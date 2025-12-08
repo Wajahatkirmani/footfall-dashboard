@@ -3,5 +3,8 @@ pandas
 numpy
 plotly
 matplotlib
+openpyxl
 prophet
+scikit-learn
+xlrd
 python-dateutil
