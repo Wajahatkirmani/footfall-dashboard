@@ -1,4 +1,3 @@
-# streamlit_app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -103,15 +102,15 @@ TOTAL_COL_CANDIDATES = ["total", "Total", "visitors", "count", "total_visitors",
 def load_excel(path):
     if not os.path.exists(path):
         raise FileNotFoundError(f"File not found: {path}. Put your Excel at {path}")
-    
+   
     # Read all sheets and combine them
     xls = pd.ExcelFile(path)
     dfs = []
-    
+   
     for sheet in xls.sheet_names:
         df = pd.read_excel(path, sheet_name=sheet)
         dfs.append(df)
-    
+   
     # Concatenate all sheets
     combined_df = pd.concat(dfs, ignore_index=True)
     return combined_df
@@ -124,7 +123,7 @@ def pick_col(df, candidates):
 
 def prepare_df(raw):
     df = raw.copy()
-    
+   
     # Debug: show what columns were found
     print(f"DEBUG: Available columns: {df.columns.tolist()}")
 
@@ -132,10 +131,10 @@ def prepare_df(raw):
     if "Year" in df.columns and "Month" in df.columns:
         # Get all regional columns first (those with Jammu or Kashmir in the name)
         regional_cols = [col for col in df.columns if ('jammu' in col.lower() or 'kashmir' in col.lower()) and col.lower() != 'total tourists in j&k']
-        
+       
         if regional_cols:
             print(f"DEBUG: Found {len(regional_cols)} regional columns: {regional_cols}")
-            
+           
             # Convert month names to numbers
             def convert_month(m):
                 if pd.isna(m):
@@ -150,40 +149,40 @@ def prepare_df(raw):
                     return int(m)
                 except:
                     return None
-            
+           
             # Convert Year to int, handling NaN values
             df["year"] = pd.to_numeric(df["Year"], errors="coerce")
             # Convert Month
             df["month_num"] = df["Month"].apply(convert_month)
-            
+           
             print(f"DEBUG: After conversion - year dtype: {df['year'].dtype}, month_num dtype: {df['month_num'].dtype}")
             print(f"DEBUG: year nulls: {df['year'].isna().sum()}, month_num nulls: {df['month_num'].isna().sum()}")
             print(f"DEBUG: Sample years: {df['year'].head()}")
             print(f"DEBUG: Sample months: {df['month_num'].head()}")
-            
+           
             # Filter to valid year/month combinations
             df = df.dropna(subset=['year', 'month_num']).copy()
             print(f"DEBUG: df shape after dropna: {df.shape}")
-            
+           
             # Create date column
             df["date"] = pd.to_datetime(df["year"].astype(int).astype(str) + "-" + df['month_num'].astype(int).astype(str) + "-01", errors="coerce")
             df["month"] = df["month_num"].astype(int)
-            
+           
             # Drop any remaining rows with invalid dates
             df = df.dropna(subset=['date']).copy()
             print(f"DEBUG: df shape after date creation: {df.shape}")
-            
+           
             if df.empty:
                 print("DEBUG: No valid data after year/month/date conversion!")
                 return pd.DataFrame()
-            
+           
             # Unpivot regional columns to long format
             id_cols = ["date", "year", "month"]
-            
+           
             df_melted = df.melt(id_vars=id_cols, value_vars=regional_cols, var_name='region_metric', value_name='count')
             print(f"DEBUG: df_melted shape after melt: {df_melted.shape}")
             print(f"DEBUG: df_melted sample:\n{df_melted.head()}")
-            
+           
             # Parse region and metric from column names - handle case insensitivity
             def parse_region_metric(col_name):
                 col_lower = col_name.lower()
@@ -196,32 +195,32 @@ def prepare_df(raw):
                     metric = col_lower.replace('kashmir_', '').replace('kashmir', '')
                 else:
                     return None, None
-                
+               
                 # Clean up metric
                 metric = metric.strip('_').lower()
                 if metric.startswith('_'):
                     metric = metric[1:]
-                
+               
                 return region, metric
-            
+           
             # Apply parsing and create new columns
             parsed_data = df_melted['region_metric'].apply(lambda x: parse_region_metric(x))
             df_melted['region'] = parsed_data.apply(lambda x: x[0] if x else None)
             df_melted['metric'] = parsed_data.apply(lambda x: x[1] if x else None)
-            
+           
             print(f"DEBUG: Before filtering - {len(df_melted)} rows")
             print(f"DEBUG: Sample region_metric values: {df_melted['region_metric'].head(10).tolist()}")
             print(f"DEBUG: Sample parsed region values: {df_melted['region'].head(10).tolist()}")
             print(f"DEBUG: Sample parsed metric values: {df_melted['metric'].head(10).tolist()}")
-            
+           
             # Filter out rows where parsing failed
             df_melted = df_melted.dropna(subset=['region', 'metric']).copy()
             df_melted['count'] = pd.to_numeric(df_melted['count'], errors='coerce').fillna(0)
-            
+           
             print(f"DEBUG: df_melted after parsing has {len(df_melted)} rows")
             if len(df_melted) > 0:
                 print(f"DEBUG: Unique metrics: {df_melted['metric'].unique().tolist()}")
-            
+           
             # Create separate columns for domestic, foreign, total
             result_rows = []
             for _, row in df_melted.iterrows():
@@ -233,38 +232,38 @@ def prepare_df(raw):
                     'metric': row['metric'].lower() if isinstance(row['metric'], str) else '',
                     'value': row['count']
                 })
-            
+           
             df_unpivot = pd.DataFrame(result_rows)
             print(f"DEBUG: df_unpivot has {len(df_unpivot)} rows")
             if len(df_unpivot) == 0:
                 print("DEBUG: df_unpivot is empty, cannot pivot")
                 return pd.DataFrame()
-            
+           
             df_final = df_unpivot.pivot_table(
                 index=['date', 'year', 'month', 'region'],
                 columns='metric',
                 values='value',
                 aggfunc='sum'
             ).reset_index()
-            
+           
             # Ensure all columns exist
             for col in ['domestic', 'foreign', 'total']:
                 if col not in df_final.columns:
                     df_final[col] = 0
-            
+           
             # Handle total if not calculated
             if (df_final['total'] == 0).all():
                 df_final['total'] = df_final['domestic'] + df_final['foreign']
-            
+           
             print(f"DEBUG: Processed {len(df_final)} rows from regional columns")
             print(f"DEBUG: Year range: {df_final['year'].min()} - {df_final['year'].max()}")
             print(f"DEBUG: Regions: {df_final['region'].unique().tolist()}")
-            
+           
             if not df_final.empty:
                 return df_final[["date","year","month","region","domestic","foreign","total"]]
             else:
                 print("DEBUG: df_final is empty after processing regional columns")
-    
+   
     # Fallback to original logic
     date_col = pick_col(df, DATE_COL_CANDIDATES)
     region_col = pick_col(df, REGION_COL_CANDIDATES)
@@ -296,7 +295,7 @@ def prepare_df(raw):
                         except ValueError:
                             return None
                     return int(m) if pd.notna(m) else None
-                
+               
                 df['month_num'] = df[mcol].apply(convert_month)
                 df[date_col] = pd.to_datetime(df[ycol].astype(str) + "-" + df['month_num'].astype(str) + "-01", errors="coerce")
                 df = df.drop('month_num', axis=1)
@@ -367,7 +366,14 @@ with st.sidebar:
     regions = st.multiselect("Regions", options=sorted(df["region"].unique()), default=sorted(df["region"].unique()))
     show_type = st.selectbox("Visitor Type", ["Total", "Domestic", "Foreign"], index=0)
     month_filter = st.selectbox("Filter by Month", ["All"] + list(calendar.month_name[1:]), index=0)
-    forecast_years = st.slider("Forecast Years Ahead", 1, 5, 2)
+    # heatmap colorscale selection (avoid red as 'good')
+    heatmap_colorscale = st.selectbox(
+        "Heatmap colorscale (avoid red = 'good')",
+        options=["Viridis", "YlGnBu", "Cividis", "Plasma", "Blues"],
+        index=0,
+        help="Pick a colorscale where red isn't the primary 'good' color. Default = Viridis"
+    )
+    forecast_years = st.slider("Forecast Years Ahead", 1, 5, 5)
     # Debug toggles
     debug_heatmap = st.checkbox("Show heatmap debug info", value=False)
 
@@ -414,7 +420,7 @@ if not df_f.empty:
         idx_max = monthly[metric_col].idxmax()
         peak = monthly.loc[idx_max]
         peak_val = f"{int(peak[metric_col]):,}"
-        
+       
 k4.metric("🏆 Peak Month", peak_val)
 
 # Time series (bar + line overlay)
@@ -553,7 +559,7 @@ if not pivot.empty:
                 z=pivot.values,
                 x=month_labels,
                 y=years,
-                colorscale='YlOrRd',
+                colorscale=heatmap_colorscale,
                 zmin=zmin,
                 zmax=zmax,
                 colorbar=dict(tickfont=dict(color='#2c3e50'), title='Visitors', tickformat=','),
@@ -577,9 +583,19 @@ if not pivot.empty:
         # Server-rendered static PNG fallback (matplotlib) - useful when plotly client rendering fails
         try:
             static_path = os.path.join("data", "heatmap_static.png")
+            # Map Plotly colorscale names to matplotlib cmaps for the static fallback
+            mpl_cmap_map = {
+                "Viridis": "viridis",
+                "YlGnBu": "YlGnBu",
+                "Cividis": "cividis",
+                "Plasma": "plasma",
+                "Blues": "Blues"
+            }
+            cmap_name = mpl_cmap_map.get(heatmap_colorscale, "viridis")
+
             # Create a matplotlib heatmap to guarantee a visual on the server
             fig, ax = plt.subplots(figsize=(10, max(3, len(years) * 0.35)))
-            im = ax.imshow(pivot.values, aspect='auto', cmap='YlOrRd', origin='lower')
+            im = ax.imshow(pivot.values, aspect='auto', cmap=cmap_name, origin='lower')
 
             # X ticks -> months
             ax.set_xticks(np.arange(len(month_labels)))
@@ -597,141 +613,124 @@ if not pivot.empty:
             cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{int(x):,}"))
 
-            plt.tight_layout()
+            fig.tight_layout()
             fig.savefig(static_path, dpi=150)
             plt.close(fig)
-
-            # Display static image below the interactive Plotly heatmap (fallback)
-            try:
-                st.image(static_path, use_column_width=True, caption="Static PNG fallback heatmap (server-rendered)")
-            except Exception as e:
-                print(f"DEBUG: Failed to display static PNG in Streamlit: {e}")
+            st.image(static_path, use_column_width=True)
         except Exception as e:
-            print(f"DEBUG: Failed to create static heatmap PNG: {e}")
+            print(f"DEBUG: Matplotlib heatmap failed: {e}")
 
-        # If debug flag is on, also show the pivot table and a go.Heatmap for verification
-        if 'debug_heatmap' in locals() and debug_heatmap:
-            st.write("pivot (sample):")
-            st.dataframe(pivot.head())
-            try:
-                hm_debug = go.Figure(data=go.Heatmap(
-                    z=pivot.values,
-                    x=month_labels,
-                    y=years,
-                    colorscale='YlOrRd'
-                ))
-                hm_debug.update_layout(title='Heatmap (debug go.Heatmap)')
-                st.plotly_chart(hm_debug, use_container_width=True)
-            except Exception as e:
-                st.write("Failed to render debug go.Heatmap:", e)
+# ---------- Forecasting: train ONLY on 2023,2024,2025 and forecast next N years (controlled by sidebar slider) ----------
+TRAIN_YEARS = [2023, 2024, 2025]
 
-# Peak & lean by region
-st.markdown("### 🎯 Peak & Lean Months by Region")
-for region in regions:
-    df_r = df_f[df_f["region"]==region]
-    if df_r.empty:
-        st.info(f"No data available for **{region}** in selected filters")
-        continue
-    
-    monthly = df_r.groupby(["year","month"])[metric_col].sum().reset_index()
-    if len(monthly) == 0:
-        continue
-    
-    idx_max = monthly[metric_col].idxmax()
-    idx_min = monthly[metric_col].idxmin()
-    peak = monthly.loc[idx_max]
-    lean = monthly.loc[idx_min]
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric(
-            f"🏆 {region} — Peak",
-            f"{int(peak[metric_col]):,}",
-            f"{int(peak['year'])}-{int(peak['month'])}"
-        )
-    with col2:
-        st.metric(
-            f"📉 {region} — Lean",
-            f"{int(lean[metric_col]):,}",
-            f"{int(lean['year'])}-{int(lean['month'])}"
-        )
+def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5):
+    # Filter training data strictly to TRAIN_YEARS for this region
+    train_df = df_source[(df_source["year"].isin(TRAIN_YEARS)) & (df_source["region"] == region_name)].copy()
+    if train_df.empty:
+        return None, None, None
 
-# Forecasting (Prophet)
-st.markdown("---")
-st.markdown("## 🔮 Visitor Forecast (Next Years)")
-if df_f.empty:
-    st.info("No data selected for forecasting. Adjust filters to see predictions.")
+    # Aggregate to month-start frequency
+    monthly = train_df.groupby("date")[metric_col].sum().reset_index()
+    monthly = monthly.set_index("date").resample("MS").sum().reset_index()
+    monthly = monthly.rename(columns={metric_col: "y", "date": "ds"})
+
+    # Fit Prophet with yearly seasonality and an added monthly-like seasonality
+    m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+    m.add_seasonality(name="monthly_effect", period=30.5, fourier_order=5)
+    m.fit(monthly[["ds", "y"]])
+
+    # Build future monthly frame and predict
+    future = m.make_future_dataframe(periods=years_ahead * 12, freq='MS')
+    forecast = m.predict(future)
+    last_train_date = monthly["ds"].max()
+    return m, forecast, last_train_date
+
+st.markdown("## 🔮 Visitor Forecast (trained only on 2023–2025)")
+st.markdown("Forecasts are produced per-region using only months from 2023, 2024 and 2025 as training data.")
+
+avail_regions = sorted(df["region"].unique())
+regions_to_forecast = st.multiselect("Regions to forecast (training limited to 2023-2025)", options=avail_regions, default=avail_regions)
+
+if len(regions_to_forecast) == 0:
+    st.info("Select at least one region to generate forecasts.")
 else:
-    with st.spinner("🤖 Training Prophet forecast model..."):
-        ts_forecast_df = df_f.groupby("date")[metric_col].sum().reset_index().rename(columns={"date":"ds", metric_col:"y"})
-        ts_forecast_df = ts_forecast_df.sort_values("ds")
-        full_idx = pd.date_range(start=ts_forecast_df["ds"].min(), end=ts_forecast_df["ds"].max(), freq="MS")
-        ts_forecast_df = ts_forecast_df.set_index("ds").reindex(full_idx).rename_axis("ds").fillna(0).reset_index()
-        m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-        m.fit(ts_forecast_df.rename(columns={"ds":"ds","y":"y"}))
-        future = m.make_future_dataframe(periods=12*forecast_years, freq="MS")
-        forecast = m.predict(future)
-        
-        fig_f = plot_plotly(m, forecast)
-        fig_f.update_layout(
-            title="Visitor Forecast with Confidence Intervals",
-            xaxis_title="Date",
-            yaxis_title="Forecasted Visitors",
-            template='plotly_white',
-            font=dict(size=12, color='#2c3e50'),
-            height=500,
-            hovermode='x unified',
-            paper_bgcolor='rgba(240,240,240,0.3)',
-            plot_bgcolor='rgba(255,255,255,1)',
-        )
-        # Add observed historical bars behind the forecast for readability
+    cols = st.columns(len(regions_to_forecast))
+    summary_rows = []
+    for i, reg in enumerate(regions_to_forecast):
+        with cols[i]:
+            st.markdown(f"### ➤ {reg} forecast")
+            model, fcst, last_train = make_prophet_forecast(df, reg, metric_col, years_ahead=forecast_years)
+            if model is None:
+                st.warning(f"No training rows for {reg} in years {TRAIN_YEARS}. Can't forecast.")
+                continue
+
+            # Interactive Prophet plot
+            try:
+                fig_prophet = plot_plotly(model, fcst)
+                fig_prophet.update_layout(
+                    title=f"{reg} — Monthly forecast (trained on {TRAIN_YEARS})",
+                    height=420,
+                    template="plotly_white",
+                    margin=dict(t=80)
+                )
+                st.plotly_chart(fig_prophet, use_container_width=True)
+            except Exception as e:
+                st.write("Interactive forecast plot failed:", e)
+
+            # Compact yearly forecast table for the next N years
+            fcst_monthly = fcst.copy()
+            fcst_monthly["year"] = fcst_monthly["ds"].dt.year
+            if last_train is not None:
+                forecast_start = (last_train + pd.DateOffset(months=1)).replace(day=1)
+            else:
+                forecast_start = fcst_monthly["ds"].min()
+
+            future_mask = fcst_monthly["ds"] >= forecast_start
+            future_monthly = fcst_monthly.loc[future_mask, ["ds", "yhat"]].copy()
+            if future_monthly.empty:
+                st.info("No future months in forecast (check training data).")
+                continue
+
+            future_monthly["year"] = future_monthly["ds"].dt.year
+            yearly_forecast = future_monthly.groupby("year")["yhat"].sum().reset_index()
+            last_year_in_train = last_train.year if last_train is not None else df["year"].max()
+            target_years = list(range(last_year_in_train + 1, last_year_in_train + 1 + forecast_years))
+            yearly_forecast = yearly_forecast[yearly_forecast["year"].isin(target_years)].copy()
+            yearly_forecast["yhat"] = yearly_forecast["yhat"].round().astype(int)
+
+            st.table(yearly_forecast.rename(columns={"year": "Year", "yhat": "Predicted visitors (sum)"}).set_index("Year"))
+
+            # --- Download button for this region's yearly forecast (CSV) ---
+            try:
+                csv_region = yearly_forecast.rename(columns={"year": "Year", "yhat": "Predicted visitors (sum)"}).to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label=f"Download {reg} yearly forecast CSV",
+                    data=csv_region,
+                    file_name=f"{reg.lower().replace(' ', '_')}_yearly_forecast.csv",
+                    mime='text/csv'
+                )
+            except Exception as e:
+                st.write("Download button for regional forecast failed:", e)
+
+            for _, r in yearly_forecast.iterrows():
+                summary_rows.append({"region": reg, "year": int(r["year"]), "predicted": int(r["yhat"])})
+
+    # Combined summary table across regions
+    if summary_rows:
+        st.markdown("### 📋 Combined Forecast Summary")
+        summary_df = pd.DataFrame(summary_rows)
+        pivot_sum = summary_df.pivot_table(index="year", columns="region", values="predicted", aggfunc="sum", fill_value=0).reset_index().rename(columns={"year":"Year"})
+        st.dataframe(pivot_sum.style.format("{:,}"), height=300)
+       
+        # --- Download button for combined forecast summary (CSV) ---
         try:
-            fig_f.add_trace(go.Bar(
-                x=ts_forecast_df['ds'],
-                y=ts_forecast_df['y'],
-                name='Observed',
-                marker_color='rgba(31,119,180,0.35)',
-                opacity=0.6,
-                hovertemplate='%{y:,}<extra></extra>'
-            ))
-            # overlay bars behind lines
-            fig_f.update_layout(barmode='overlay')
-        except Exception:
-            # if anything goes wrong skip adding bars (keep forecast plot functional)
-            pass
-        # Ensure all text elements are dark colored
-        fig_f.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#e0e0e0', title_font=dict(color='#2c3e50'), tickfont=dict(color='#2c3e50'))
-        fig_f.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#e0e0e0', title_font=dict(color='#2c3e50'), tickfont=dict(color='#2c3e50'))
-        st.plotly_chart(fig_f, use_container_width=True)
-        
-        # Get future forecast (beyond training data)
-        max_date = ts_forecast_df["ds"].max()
-        future_forecast = forecast[forecast["ds"] > max_date].copy()
-        if not future_forecast.empty:
-            future_totals = future_forecast.set_index("ds")["yhat"].resample("Y").sum()
-            st.markdown("### 📊 Predicted Annual Totals")
-            
-            forecast_table = pd.DataFrame({
-                "Year": [d.year for d in future_totals.index],
-                "Forecasted Visitors": future_totals.round().astype(int).values
-            })
-            
-            st.dataframe(forecast_table)
-
-st.markdown("---")
-st.markdown("### 📥 Export Data")
-csv_data = df_f.to_csv(index=False)
-st.download_button(
-    label="⬇️ Download Filtered Data (CSV)",
-    data=csv_data.encode("utf-8"),
-    file_name=f"jk_footfall_{start_year}_{end_year}.csv",
-    mime="text/csv"
-)
-
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: #666; font-size: 12px; padding: 20px;'>
-    <p>Jammu & Kashmir Tourism Footfall Dashboard | Data Period: 2015-2025</p>
-    <p>Last Updated: December 2025</p>
-</div>
-""", unsafe_allow_html=True)
+            csv_combined = pivot_sum.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Download combined forecast CSV",
+                data=csv_combined,
+                file_name="jk_combined_forecast_summary.csv",
+                mime='text/csv'
+            )
+        except Exception as e:
+            st.write("Download button for combined forecast failed:", e)
+# ------------------------------------------------------------------------------------------
