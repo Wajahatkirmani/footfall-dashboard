@@ -623,53 +623,85 @@ if not pivot.empty:
 # ---------- Forecasting: train ONLY on 2023,2024,2025 and forecast next N years (controlled by sidebar slider) ----------
 TRAIN_YEARS = [2023, 2024, 2025]
 
-def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5):
+def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5, cap_multiplier=1.2, fallback_cap=1_000_000):
     """
-    Train Prophet using logistic growth (plateauing) with an automatically computed CAP
-    based on the region's historical monthly max and forecast for `years_ahead` years.
+    Train Prophet using logistic growth (plateauing) safely.
 
-    Returns: (model, forecast_df, last_train_date)
+    Parameters:
+      - df_source: original dataframe (must contain 'date','year','region', metric_col)
+      - region_name: region to train on (e.g., 'Kashmir' or 'Jammu')
+      - metric_col: column name to forecast ('total' / 'domestic' / 'foreign')
+      - years_ahead: integer horizon in years
+      - cap_multiplier: multiplier for cap relative to observed max (default 1.2)
+      - fallback_cap: fallback CAP if historical max is missing or invalid
+
+    Returns: (model, forecast_df, last_train_date) or (None, None, None) if no training data
     """
-    # Filter training data strictly to TRAIN_YEARS for this region
+    # 1) Filter training data to the fixed years (2023-2025)
     train_df = df_source[(df_source["year"].isin(TRAIN_YEARS)) & (df_source["region"] == region_name)].copy()
     if train_df.empty:
         return None, None, None
 
-    # Aggregate to month-start frequency
+    # 2) Aggregate to regular monthly series (month-start)
     monthly = train_df.groupby("date")[metric_col].sum().reset_index()
     monthly = monthly.set_index("date").resample("MS").sum().reset_index()
     monthly = monthly.rename(columns={metric_col: "y", "date": "ds"})
 
-    # Compute CAP based on observed maximum monthly value for this region
-    # Default to 20% above the maximum observed monthly visitors (soft plateau)
-    max_obs = 0
-    if 'y' in monthly.columns and not monthly['y'].isna().all():
-        max_obs = monthly['y'].max()
+    # Ensure y is numeric and non-negative
+    monthly["y"] = pd.to_numeric(monthly["y"], errors="coerce").fillna(0)
+    monthly["y"] = monthly["y"].clip(lower=0)
 
+    # 3) Compute a safe CAP (capacity) for logistic growth
+    max_obs = monthly["y"].max() if "y" in monthly.columns else None
     if pd.isna(max_obs) or max_obs <= 0:
-        # fallback CAP to avoid zero/negative caps which Prophet rejects
-        CAPACITY = 1
+        CAPACITY = float(fallback_cap)
     else:
-        CAPACITY = float(max_obs) * 1.2
+        CAPACITY = float(max_obs) * float(cap_multiplier)
+        # guard: ensure CAPACITY > max_obs
+        if CAPACITY <= max_obs:
+            CAPACITY = float(max_obs) * 1.05
 
-    # Attach cap column required for logistic growth
-    monthly['cap'] = CAPACITY
+    # Cap must be a float and > 0 for Prophet logistic growth
+    if CAPACITY <= 0:
+        CAPACITY = float(fallback_cap)
 
-    # Fit Prophet with logistic growth to model plateauing
-    m = Prophet(growth='logistic', yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-    # Add monthly-like seasonality for better monthly patterns
+    monthly["cap"] = float(CAPACITY)
+
+    # 4) Build and fit Prophet with logistic growth and additive seasonality
+    m = Prophet(
+        growth="logistic",
+        yearly_seasonality=True,
+        weekly_seasonality=False,
+        daily_seasonality=False,
+        seasonality_mode="additive"
+    )
+    # monthly-like seasonality to capture intra-year variations (keeps it stable)
     m.add_seasonality(name="monthly_effect", period=30.5, fourier_order=5)
 
-    # Fit expects 'ds','y' and 'cap'
-    m.fit(monthly[["ds", "y", "cap"]])
+    # Fit requires ds, y, cap
+    try:
+        m.fit(monthly[["ds", "y", "cap"]])
+    except Exception as e:
+        # fitting can fail if data is degenerate; return None so calling code can handle
+        print(f"Prophet fit error for region {region_name}: {e}")
+        return None, None, None
 
-    # Build future monthly frame and set cap for future rows as well
-    future = m.make_future_dataframe(periods=years_ahead * 12, freq='MS')
-    future['cap'] = CAPACITY
+    # 5) Create future frame and ensure cap column is present for all rows
+    future = m.make_future_dataframe(periods=years_ahead * 12, freq="MS")
+    future["cap"] = float(CAPACITY)
 
+    # 6) Predict and post-process to keep forecasts realistic
     forecast = m.predict(future)
-    last_train_date = monthly["ds"].max()
+
+    # Clip forecasts to [0, CAPACITY] to avoid negative or >cap values because of numerical reasons
+    for col in ["yhat", "yhat_lower", "yhat_upper"]:
+        if col in forecast.columns:
+            forecast[col] = forecast[col].clip(lower=0, upper=CAPACITY)
+
+    last_train_date = monthly["ds"].max() if not monthly["ds"].empty else None
+
     return m, forecast, last_train_date
+
 
 st.markdown("## 🔮 Visitor Forecast (trained only on 2023–2025)")
 st.markdown("Forecasts are produced per-region using only months from 2023, 2024 and 2025 as training data.")
