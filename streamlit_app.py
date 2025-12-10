@@ -102,15 +102,15 @@ TOTAL_COL_CANDIDATES = ["total", "Total", "visitors", "count", "total_visitors",
 def load_excel(path):
     if not os.path.exists(path):
         raise FileNotFoundError(f"File not found: {path}. Put your Excel at {path}")
-   
+    
     # Read all sheets and combine them
     xls = pd.ExcelFile(path)
     dfs = []
-   
+    
     for sheet in xls.sheet_names:
         df = pd.read_excel(path, sheet_name=sheet)
         dfs.append(df)
-   
+    
     # Concatenate all sheets
     combined_df = pd.concat(dfs, ignore_index=True)
     return combined_df
@@ -123,7 +123,7 @@ def pick_col(df, candidates):
 
 def prepare_df(raw):
     df = raw.copy()
-   
+    
     # Debug: show what columns were found
     print(f"DEBUG: Available columns: {df.columns.tolist()}")
 
@@ -131,10 +131,10 @@ def prepare_df(raw):
     if "Year" in df.columns and "Month" in df.columns:
         # Get all regional columns first (those with Jammu or Kashmir in the name)
         regional_cols = [col for col in df.columns if ('jammu' in col.lower() or 'kashmir' in col.lower()) and col.lower() != 'total tourists in j&k']
-       
+        
         if regional_cols:
             print(f"DEBUG: Found {len(regional_cols)} regional columns: {regional_cols}")
-           
+            
             # Convert month names to numbers
             def convert_month(m):
                 if pd.isna(m):
@@ -149,40 +149,40 @@ def prepare_df(raw):
                     return int(m)
                 except:
                     return None
-           
+            
             # Convert Year to int, handling NaN values
             df["year"] = pd.to_numeric(df["Year"], errors="coerce")
             # Convert Month
             df["month_num"] = df["Month"].apply(convert_month)
-           
+            
             print(f"DEBUG: After conversion - year dtype: {df['year'].dtype}, month_num dtype: {df['month_num'].dtype}")
             print(f"DEBUG: year nulls: {df['year'].isna().sum()}, month_num nulls: {df['month_num'].isna().sum()}")
             print(f"DEBUG: Sample years: {df['year'].head()}")
             print(f"DEBUG: Sample months: {df['month_num'].head()}")
-           
+            
             # Filter to valid year/month combinations
             df = df.dropna(subset=['year', 'month_num']).copy()
             print(f"DEBUG: df shape after dropna: {df.shape}")
-           
+            
             # Create date column
             df["date"] = pd.to_datetime(df["year"].astype(int).astype(str) + "-" + df['month_num'].astype(int).astype(str) + "-01", errors="coerce")
             df["month"] = df["month_num"].astype(int)
-           
+            
             # Drop any remaining rows with invalid dates
             df = df.dropna(subset=['date']).copy()
             print(f"DEBUG: df shape after date creation: {df.shape}")
-           
+            
             if df.empty:
                 print("DEBUG: No valid data after year/month/date conversion!")
                 return pd.DataFrame()
-           
+            
             # Unpivot regional columns to long format
             id_cols = ["date", "year", "month"]
-           
+            
             df_melted = df.melt(id_vars=id_cols, value_vars=regional_cols, var_name='region_metric', value_name='count')
             print(f"DEBUG: df_melted shape after melt: {df_melted.shape}")
             print(f"DEBUG: df_melted sample:\n{df_melted.head()}")
-           
+            
             # Parse region and metric from column names - handle case insensitivity
             def parse_region_metric(col_name):
                 col_lower = col_name.lower()
@@ -195,32 +195,32 @@ def prepare_df(raw):
                     metric = col_lower.replace('kashmir_', '').replace('kashmir', '')
                 else:
                     return None, None
-               
+                
                 # Clean up metric
                 metric = metric.strip('_').lower()
                 if metric.startswith('_'):
                     metric = metric[1:]
-               
+                
                 return region, metric
-           
+            
             # Apply parsing and create new columns
             parsed_data = df_melted['region_metric'].apply(lambda x: parse_region_metric(x))
             df_melted['region'] = parsed_data.apply(lambda x: x[0] if x else None)
             df_melted['metric'] = parsed_data.apply(lambda x: x[1] if x else None)
-           
+            
             print(f"DEBUG: Before filtering - {len(df_melted)} rows")
             print(f"DEBUG: Sample region_metric values: {df_melted['region_metric'].head(10).tolist()}")
             print(f"DEBUG: Sample parsed region values: {df_melted['region'].head(10).tolist()}")
             print(f"DEBUG: Sample parsed metric values: {df_melted['metric'].head(10).tolist()}")
-           
+            
             # Filter out rows where parsing failed
             df_melted = df_melted.dropna(subset=['region', 'metric']).copy()
             df_melted['count'] = pd.to_numeric(df_melted['count'], errors='coerce').fillna(0)
-           
+            
             print(f"DEBUG: df_melted after parsing has {len(df_melted)} rows")
             if len(df_melted) > 0:
                 print(f"DEBUG: Unique metrics: {df_melted['metric'].unique().tolist()}")
-           
+            
             # Create separate columns for domestic, foreign, total
             result_rows = []
             for _, row in df_melted.iterrows():
@@ -232,38 +232,38 @@ def prepare_df(raw):
                     'metric': row['metric'].lower() if isinstance(row['metric'], str) else '',
                     'value': row['count']
                 })
-           
+            
             df_unpivot = pd.DataFrame(result_rows)
             print(f"DEBUG: df_unpivot has {len(df_unpivot)} rows")
             if len(df_unpivot) == 0:
                 print("DEBUG: df_unpivot is empty, cannot pivot")
                 return pd.DataFrame()
-           
+            
             df_final = df_unpivot.pivot_table(
                 index=['date', 'year', 'month', 'region'],
                 columns='metric',
                 values='value',
                 aggfunc='sum'
             ).reset_index()
-           
+            
             # Ensure all columns exist
             for col in ['domestic', 'foreign', 'total']:
                 if col not in df_final.columns:
                     df_final[col] = 0
-           
+            
             # Handle total if not calculated
             if (df_final['total'] == 0).all():
                 df_final['total'] = df_final['domestic'] + df_final['foreign']
-           
+            
             print(f"DEBUG: Processed {len(df_final)} rows from regional columns")
             print(f"DEBUG: Year range: {df_final['year'].min()} - {df_final['year'].max()}")
             print(f"DEBUG: Regions: {df_final['region'].unique().tolist()}")
-           
+            
             if not df_final.empty:
                 return df_final[["date","year","month","region","domestic","foreign","total"]]
             else:
                 print("DEBUG: df_final is empty after processing regional columns")
-   
+    
     # Fallback to original logic
     date_col = pick_col(df, DATE_COL_CANDIDATES)
     region_col = pick_col(df, REGION_COL_CANDIDATES)
@@ -295,7 +295,7 @@ def prepare_df(raw):
                         except ValueError:
                             return None
                     return int(m) if pd.notna(m) else None
-               
+                
                 df['month_num'] = df[mcol].apply(convert_month)
                 df[date_col] = pd.to_datetime(df[ycol].astype(str) + "-" + df['month_num'].astype(str) + "-01", errors="coerce")
                 df = df.drop('month_num', axis=1)
@@ -420,7 +420,7 @@ if not df_f.empty:
         idx_max = monthly[metric_col].idxmax()
         peak = monthly.loc[idx_max]
         peak_val = f"{int(peak[metric_col]):,}"
-       
+        
 k4.metric("🏆 Peak Month", peak_val)
 
 # Time series (bar + line overlay)
@@ -624,6 +624,12 @@ if not pivot.empty:
 TRAIN_YEARS = [2023, 2024, 2025]
 
 def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5):
+    """
+    Train Prophet using logistic growth (plateauing) with an automatically computed CAP
+    based on the region's historical monthly max and forecast for `years_ahead` years.
+
+    Returns: (model, forecast_df, last_train_date)
+    """
     # Filter training data strictly to TRAIN_YEARS for this region
     train_df = df_source[(df_source["year"].isin(TRAIN_YEARS)) & (df_source["region"] == region_name)].copy()
     if train_df.empty:
@@ -634,13 +640,33 @@ def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5):
     monthly = monthly.set_index("date").resample("MS").sum().reset_index()
     monthly = monthly.rename(columns={metric_col: "y", "date": "ds"})
 
-    # Fit Prophet with yearly seasonality and an added monthly-like seasonality
-    m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-    m.add_seasonality(name="monthly_effect", period=30.5, fourier_order=5)
-    m.fit(monthly[["ds", "y"]])
+    # Compute CAP based on observed maximum monthly value for this region
+    # Default to 20% above the maximum observed monthly visitors (soft plateau)
+    max_obs = 0
+    if 'y' in monthly.columns and not monthly['y'].isna().all():
+        max_obs = monthly['y'].max()
 
-    # Build future monthly frame and predict
+    if pd.isna(max_obs) or max_obs <= 0:
+        # fallback CAP to avoid zero/negative caps which Prophet rejects
+        CAPACITY = 1
+    else:
+        CAPACITY = float(max_obs) * 1.2
+
+    # Attach cap column required for logistic growth
+    monthly['cap'] = CAPACITY
+
+    # Fit Prophet with logistic growth to model plateauing
+    m = Prophet(growth='logistic', yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+    # Add monthly-like seasonality for better monthly patterns
+    m.add_seasonality(name="monthly_effect", period=30.5, fourier_order=5)
+
+    # Fit expects 'ds','y' and 'cap'
+    m.fit(monthly[["ds", "y", "cap"]])
+
+    # Build future monthly frame and set cap for future rows as well
     future = m.make_future_dataframe(periods=years_ahead * 12, freq='MS')
+    future['cap'] = CAPACITY
+
     forecast = m.predict(future)
     last_train_date = monthly["ds"].max()
     return m, forecast, last_train_date
@@ -721,7 +747,7 @@ else:
         summary_df = pd.DataFrame(summary_rows)
         pivot_sum = summary_df.pivot_table(index="year", columns="region", values="predicted", aggfunc="sum", fill_value=0).reset_index().rename(columns={"year":"Year"})
         st.dataframe(pivot_sum.style.format("{:,}"), height=300)
-       
+        
         # --- Download button for combined forecast summary (CSV) ---
         try:
             csv_combined = pivot_sum.to_csv(index=False).encode('utf-8')
