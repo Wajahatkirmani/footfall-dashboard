@@ -345,8 +345,36 @@ def prepare_df(raw):
     return df[["date","year","month","region","domestic","foreign","total"]]
 
 # Load and prepare
-raw_df = load_excel(EXCEL_PATH)
+# ---------- Option A: Load from multiple Google Sheets CSV URLs (one per gid) ----------
+CSV_URLS =["https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=1163737606","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=943975076","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=920869740","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=324503813","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=916058035","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=1527819261","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=1725848702","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=45912953","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=264038887","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=970583531","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=835838990"]
+
+@st.cache_data(ttl=300)
+def load_from_csv_urls(urls):
+    frames = []
+    for url in urls:
+        try:
+            df_tmp = pd.read_csv(url)
+            # optional: add a column to track source tab
+            # df_tmp["_source_url"] = url
+            frames.append(df_tmp)
+        except Exception as e:
+            st.warning(f"Failed to load CSV URL: {url} — {e}")
+    if not frames:
+        return pd.DataFrame()
+    # concat and return
+    return pd.concat(frames, ignore_index=True)
+
+raw_df = load_from_csv_urls(CSV_URLS)
+if raw_df.empty:
+    st.error("No data loaded from Google Sheets CSV URLs. Check the URLs in CSV_URLS.")
+    st.stop()
+
+# Optional: normalize columns across tabs (strip whitespace)
+raw_df.columns = [c.strip() for c in raw_df.columns]
+
+# proceed with existing prepare_df logic
 df = prepare_df(raw_df)
+# ----------------------------------------------------------------
 
 # Check if data is empty
 if df.empty:
@@ -623,85 +651,53 @@ if not pivot.empty:
 # ---------- Forecasting: train ONLY on 2023,2024,2025 and forecast next N years (controlled by sidebar slider) ----------
 TRAIN_YEARS = [2023, 2024, 2025]
 
-def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5, cap_multiplier=1.2, fallback_cap=1_000_000):
+def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5):
     """
-    Train Prophet using logistic growth (plateauing) safely.
+    Train Prophet using logistic growth (plateauing) with an automatically computed CAP
+    based on the region's historical monthly max and forecast for `years_ahead` years.
 
-    Parameters:
-      - df_source: original dataframe (must contain 'date','year','region', metric_col)
-      - region_name: region to train on (e.g., 'Kashmir' or 'Jammu')
-      - metric_col: column name to forecast ('total' / 'domestic' / 'foreign')
-      - years_ahead: integer horizon in years
-      - cap_multiplier: multiplier for cap relative to observed max (default 1.2)
-      - fallback_cap: fallback CAP if historical max is missing or invalid
-
-    Returns: (model, forecast_df, last_train_date) or (None, None, None) if no training data
+    Returns: (model, forecast_df, last_train_date)
     """
-    # 1) Filter training data to the fixed years (2023-2025)
+    # Filter training data strictly to TRAIN_YEARS for this region
     train_df = df_source[(df_source["year"].isin(TRAIN_YEARS)) & (df_source["region"] == region_name)].copy()
     if train_df.empty:
         return None, None, None
 
-    # 2) Aggregate to regular monthly series (month-start)
+    # Aggregate to month-start frequency
     monthly = train_df.groupby("date")[metric_col].sum().reset_index()
     monthly = monthly.set_index("date").resample("MS").sum().reset_index()
     monthly = monthly.rename(columns={metric_col: "y", "date": "ds"})
 
-    # Ensure y is numeric and non-negative
-    monthly["y"] = pd.to_numeric(monthly["y"], errors="coerce").fillna(0)
-    monthly["y"] = monthly["y"].clip(lower=0)
+    # Compute CAP based on observed maximum monthly value for this region
+    # Default to 20% above the maximum observed monthly visitors (soft plateau)
+    max_obs = 0
+    if 'y' in monthly.columns and not monthly['y'].isna().all():
+        max_obs = monthly['y'].max()
 
-    # 3) Compute a safe CAP (capacity) for logistic growth
-    max_obs = monthly["y"].max() if "y" in monthly.columns else None
     if pd.isna(max_obs) or max_obs <= 0:
-        CAPACITY = float(fallback_cap)
+        # fallback CAP to avoid zero/negative caps which Prophet rejects
+        CAPACITY = 1
     else:
-        CAPACITY = float(max_obs) * float(cap_multiplier)
-        # guard: ensure CAPACITY > max_obs
-        if CAPACITY <= max_obs:
-            CAPACITY = float(max_obs) * 1.05
+        CAPACITY = float(max_obs) * 1.2
 
-    # Cap must be a float and > 0 for Prophet logistic growth
-    if CAPACITY <= 0:
-        CAPACITY = float(fallback_cap)
+    # Attach cap column required for logistic growth
+    monthly['cap'] = CAPACITY
 
-    monthly["cap"] = float(CAPACITY)
-
-    # 4) Build and fit Prophet with logistic growth and additive seasonality
-    m = Prophet(
-        growth="logistic",
-        yearly_seasonality=True,
-        weekly_seasonality=False,
-        daily_seasonality=False,
-        seasonality_mode="additive"
-    )
-    # monthly-like seasonality to capture intra-year variations (keeps it stable)
+    # Fit Prophet with logistic growth to model plateauing
+    m = Prophet(growth='logistic', yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+    # Add monthly-like seasonality for better monthly patterns
     m.add_seasonality(name="monthly_effect", period=30.5, fourier_order=5)
 
-    # Fit requires ds, y, cap
-    try:
-        m.fit(monthly[["ds", "y", "cap"]])
-    except Exception as e:
-        # fitting can fail if data is degenerate; return None so calling code can handle
-        print(f"Prophet fit error for region {region_name}: {e}")
-        return None, None, None
+    # Fit expects 'ds','y' and 'cap'
+    m.fit(monthly[["ds", "y", "cap"]])
 
-    # 5) Create future frame and ensure cap column is present for all rows
-    future = m.make_future_dataframe(periods=years_ahead * 12, freq="MS")
-    future["cap"] = float(CAPACITY)
+    # Build future monthly frame and set cap for future rows as well
+    future = m.make_future_dataframe(periods=years_ahead * 12, freq='MS')
+    future['cap'] = CAPACITY
 
-    # 6) Predict and post-process to keep forecasts realistic
     forecast = m.predict(future)
-
-    # Clip forecasts to [0, CAPACITY] to avoid negative or >cap values because of numerical reasons
-    for col in ["yhat", "yhat_lower", "yhat_upper"]:
-        if col in forecast.columns:
-            forecast[col] = forecast[col].clip(lower=0, upper=CAPACITY)
-
-    last_train_date = monthly["ds"].max() if not monthly["ds"].empty else None
-
+    last_train_date = monthly["ds"].max()
     return m, forecast, last_train_date
-
 
 st.markdown("## 🔮 Visitor Forecast (trained only on 2023–2025)")
 st.markdown("Forecasts are produced per-region using only months from 2023, 2024 and 2025 as training data.")
