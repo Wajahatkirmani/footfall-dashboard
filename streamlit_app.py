@@ -402,6 +402,9 @@ with st.sidebar:
         help="Pick a colorscale where red isn't the primary 'good' color. Default = Viridis"
     )
     forecast_years = st.slider("Forecast Years Ahead", 1, 5, 5)
+    # ======== NEW: Plateau multiplier control ========
+    plateau_multiplier = st.slider("Plateau multiplier (cap = max_month * multiplier)", 1.0, 3.0, 1.2, step=0.05,
+                                   help="Higher values place the logistic cap further above historical max; lower values show an earlier plateau.")
     # Debug toggles
     debug_heatmap = st.checkbox("Show heatmap debug info", value=False)
 
@@ -651,17 +654,15 @@ if not pivot.empty:
 # ---------- Forecasting: train ONLY on 2023,2024,2025 and forecast next N years (controlled by sidebar slider) ----------
 TRAIN_YEARS = [2023, 2024, 2025]
 
-def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5):
+def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5, cap_multiplier=1.2):
     """
-    Train Prophet using logistic growth (plateauing) with an automatically computed CAP
-    based on the region's historical monthly max and forecast for `years_ahead` years.
-
-    Returns: (model, forecast_df, last_train_date)
+    Train Prophet using logistic growth with an explicitly set cap multiplier.
+    Returns: (model, forecast_df, last_train_date, capacity)
     """
     # Filter training data strictly to TRAIN_YEARS for this region
     train_df = df_source[(df_source["year"].isin(TRAIN_YEARS)) & (df_source["region"] == region_name)].copy()
     if train_df.empty:
-        return None, None, None
+        return None, None, None, None
 
     # Aggregate to month-start frequency
     monthly = train_df.groupby("date")[metric_col].sum().reset_index()
@@ -669,16 +670,14 @@ def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5):
     monthly = monthly.rename(columns={metric_col: "y", "date": "ds"})
 
     # Compute CAP based on observed maximum monthly value for this region
-    # Default to 20% above the maximum observed monthly visitors (soft plateau)
     max_obs = 0
     if 'y' in monthly.columns and not monthly['y'].isna().all():
         max_obs = monthly['y'].max()
 
     if pd.isna(max_obs) or max_obs <= 0:
-        # fallback CAP to avoid zero/negative caps which Prophet rejects
-        CAPACITY = 1
+        CAPACITY = 1.0
     else:
-        CAPACITY = float(max_obs) * 1.2
+        CAPACITY = float(max_obs) * float(cap_multiplier)
 
     # Attach cap column required for logistic growth
     monthly['cap'] = CAPACITY
@@ -689,7 +688,17 @@ def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5):
     m.add_seasonality(name="monthly_effect", period=30.5, fourier_order=5)
 
     # Fit expects 'ds','y' and 'cap'
-    m.fit(monthly[["ds", "y", "cap"]])
+    try:
+        m.fit(monthly[["ds", "y", "cap"]])
+    except Exception as e:
+        # fallback to additive growth if logistic fails
+        m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+        m.add_seasonality(name="monthly_effect", period=30.5, fourier_order=5)
+        m.fit(monthly[["ds", "y"]])
+        future = m.make_future_dataframe(periods=years_ahead * 12, freq='MS')
+        forecast = m.predict(future)
+        last_train_date = monthly["ds"].max()
+        return m, forecast, last_train_date, CAPACITY
 
     # Build future monthly frame and set cap for future rows as well
     future = m.make_future_dataframe(periods=years_ahead * 12, freq='MS')
@@ -697,7 +706,7 @@ def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5):
 
     forecast = m.predict(future)
     last_train_date = monthly["ds"].max()
-    return m, forecast, last_train_date
+    return m, forecast, last_train_date, CAPACITY
 
 st.markdown("## 🔮 Visitor Forecast (trained only on 2023–2025)")
 st.markdown("Forecasts are produced per-region using only months from 2023, 2024 and 2025 as training data.")
@@ -713,7 +722,7 @@ else:
     for i, reg in enumerate(regions_to_forecast):
         with cols[i]:
             st.markdown(f"### ➤ {reg} forecast")
-            model, fcst, last_train = make_prophet_forecast(df, reg, metric_col, years_ahead=forecast_years)
+            model, fcst, last_train, cap = make_prophet_forecast(df, reg, metric_col, years_ahead=forecast_years, cap_multiplier=plateau_multiplier)
             if model is None:
                 st.warning(f"No training rows for {reg} in years {TRAIN_YEARS}. Can't forecast.")
                 continue
@@ -721,9 +730,22 @@ else:
             # Interactive Prophet plot
             try:
                 fig_prophet = plot_plotly(model, fcst)
+                # Add horizontal cap line across forecast horizon for visual reference (if cap known)
+                if cap is not None:
+                    # use fcst ds for x-values (ensures same x-axis)
+                    x_vals = fcst['ds']
+                    cap_line = go.Scatter(
+                        x=x_vals,
+                        y=[cap] * len(x_vals),
+                        mode='lines',
+                        line=dict(color='red', width=2, dash='dash'),
+                        name='CAP (plateau)'
+                    )
+                    fig_prophet.add_trace(cap_line)
+
                 fig_prophet.update_layout(
                     title=f"{reg} — Monthly forecast (trained on {TRAIN_YEARS})",
-                    height=420,
+                    height=460,
                     template="plotly_white",
                     margin=dict(t=80)
                 )
@@ -765,6 +787,16 @@ else:
                 )
             except Exception as e:
                 st.write("Download button for regional forecast failed:", e)
+
+            # --- Display CAP and sample forecast rows for debugging/inspection ---
+            try:
+                if cap is not None:
+                    st.markdown(f"**Cap used for logistic growth:** {int(cap):,}  (multiplier = {plateau_multiplier})")
+                sample_fcst = fcst[['ds','yhat','yhat_lower','yhat_upper']].copy()
+                sample_fcst['ds'] = sample_fcst['ds'].dt.strftime('%Y-%m')
+                st.dataframe(sample_fcst.tail(12).rename(columns={'ds':'Month','yhat':'Predicted','yhat_lower':'Lower','yhat_upper':'Upper'}).style.format({ 'Predicted': '{:,.0f}', 'Lower':'{:,.0f}', 'Upper':'{:,.0f}'}), height=280)
+            except Exception as e:
+                st.write("Could not display sample forecast table:", e)
 
             for _, r in yearly_forecast.iterrows():
                 summary_rows.append({"region": reg, "year": int(r["year"]), "predicted": int(r["yhat"])})
