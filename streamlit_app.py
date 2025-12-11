@@ -345,36 +345,8 @@ def prepare_df(raw):
     return df[["date","year","month","region","domestic","foreign","total"]]
 
 # Load and prepare
-# ---------- Option A: Load from multiple Google Sheets CSV URLs (one per gid) ----------
-CSV_URLS =["https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=1163737606","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=943975076","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=920869740","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=324503813","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=916058035","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=1527819261","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=1725848702","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=45912953","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=264038887","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=970583531","https://docs.google.com/spreadsheets/d/e/2PACX-1vQb_USQ0Guvb2dB23pb2uUhJ1Ep2VLQ7R2g8fAUAhYG1qBzIYcb0bXxydQ2wl4vWidCL7unV3YCWvXp/pub?output=csv&gid=835838990"]
-
-@st.cache_data(ttl=300)
-def load_from_csv_urls(urls):
-    frames = []
-    for url in urls:
-        try:
-            df_tmp = pd.read_csv(url)
-            # optional: add a column to track source tab
-            # df_tmp["_source_url"] = url
-            frames.append(df_tmp)
-        except Exception as e:
-            st.warning(f"Failed to load CSV URL: {url} — {e}")
-    if not frames:
-        return pd.DataFrame()
-    # concat and return
-    return pd.concat(frames, ignore_index=True)
-
-raw_df = load_from_csv_urls(CSV_URLS)
-if raw_df.empty:
-    st.error("No data loaded from Google Sheets CSV URLs. Check the URLs in CSV_URLS.")
-    st.stop()
-
-# Optional: normalize columns across tabs (strip whitespace)
-raw_df.columns = [c.strip() for c in raw_df.columns]
-
-# proceed with existing prepare_df logic
+raw_df = load_excel(EXCEL_PATH)
 df = prepare_df(raw_df)
-# ----------------------------------------------------------------
 
 # Check if data is empty
 if df.empty:
@@ -402,9 +374,6 @@ with st.sidebar:
         help="Pick a colorscale where red isn't the primary 'good' color. Default = Viridis"
     )
     forecast_years = st.slider("Forecast Years Ahead", 1, 5, 5)
-    # ======== NEW: Plateau multiplier control ========
-    plateau_multiplier = st.slider("Plateau multiplier (cap = max_month * multiplier)", 1.0, 3.0, 1.2, step=0.05,
-                                   help="Higher values place the logistic cap further above historical max; lower values show an earlier plateau.")
     # Debug toggles
     debug_heatmap = st.checkbox("Show heatmap debug info", value=False)
 
@@ -654,59 +623,85 @@ if not pivot.empty:
 # ---------- Forecasting: train ONLY on 2023,2024,2025 and forecast next N years (controlled by sidebar slider) ----------
 TRAIN_YEARS = [2023, 2024, 2025]
 
-def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5, cap_multiplier=1.2):
+def make_prophet_forecast(df_source, region_name, metric_col, years_ahead=5, cap_multiplier=1.2, fallback_cap=1_000_000):
     """
-    Train Prophet using logistic growth with an explicitly set cap multiplier.
-    Returns: (model, forecast_df, last_train_date, capacity)
+    Train Prophet using logistic growth (plateauing) safely.
+
+    Parameters:
+      - df_source: original dataframe (must contain 'date','year','region', metric_col)
+      - region_name: region to train on (e.g., 'Kashmir' or 'Jammu')
+      - metric_col: column name to forecast ('total' / 'domestic' / 'foreign')
+      - years_ahead: integer horizon in years
+      - cap_multiplier: multiplier for cap relative to observed max (default 1.2)
+      - fallback_cap: fallback CAP if historical max is missing or invalid
+
+    Returns: (model, forecast_df, last_train_date) or (None, None, None) if no training data
     """
-    # Filter training data strictly to TRAIN_YEARS for this region
+    # 1) Filter training data to the fixed years (2023-2025)
     train_df = df_source[(df_source["year"].isin(TRAIN_YEARS)) & (df_source["region"] == region_name)].copy()
     if train_df.empty:
-        return None, None, None, None
+        return None, None, None
 
-    # Aggregate to month-start frequency
+    # 2) Aggregate to regular monthly series (month-start)
     monthly = train_df.groupby("date")[metric_col].sum().reset_index()
     monthly = monthly.set_index("date").resample("MS").sum().reset_index()
     monthly = monthly.rename(columns={metric_col: "y", "date": "ds"})
 
-    # Compute CAP based on observed maximum monthly value for this region
-    max_obs = 0
-    if 'y' in monthly.columns and not monthly['y'].isna().all():
-        max_obs = monthly['y'].max()
+    # Ensure y is numeric and non-negative
+    monthly["y"] = pd.to_numeric(monthly["y"], errors="coerce").fillna(0)
+    monthly["y"] = monthly["y"].clip(lower=0)
 
+    # 3) Compute a safe CAP (capacity) for logistic growth
+    max_obs = monthly["y"].max() if "y" in monthly.columns else None
     if pd.isna(max_obs) or max_obs <= 0:
-        CAPACITY = 1.0
+        CAPACITY = float(fallback_cap)
     else:
         CAPACITY = float(max_obs) * float(cap_multiplier)
+        # guard: ensure CAPACITY > max_obs
+        if CAPACITY <= max_obs:
+            CAPACITY = float(max_obs) * 1.05
 
-    # Attach cap column required for logistic growth
-    monthly['cap'] = CAPACITY
+    # Cap must be a float and > 0 for Prophet logistic growth
+    if CAPACITY <= 0:
+        CAPACITY = float(fallback_cap)
 
-    # Fit Prophet with logistic growth to model plateauing
-    m = Prophet(growth='logistic', yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-    # Add monthly-like seasonality for better monthly patterns
+    monthly["cap"] = float(CAPACITY)
+
+    # 4) Build and fit Prophet with logistic growth and additive seasonality
+    m = Prophet(
+        growth="logistic",
+        yearly_seasonality=True,
+        weekly_seasonality=False,
+        daily_seasonality=False,
+        seasonality_mode="additive"
+    )
+    # monthly-like seasonality to capture intra-year variations (keeps it stable)
     m.add_seasonality(name="monthly_effect", period=30.5, fourier_order=5)
 
-    # Fit expects 'ds','y' and 'cap'
+    # Fit requires ds, y, cap
     try:
         m.fit(monthly[["ds", "y", "cap"]])
     except Exception as e:
-        # fallback to additive growth if logistic fails
-        m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-        m.add_seasonality(name="monthly_effect", period=30.5, fourier_order=5)
-        m.fit(monthly[["ds", "y"]])
-        future = m.make_future_dataframe(periods=years_ahead * 12, freq='MS')
-        forecast = m.predict(future)
-        last_train_date = monthly["ds"].max()
-        return m, forecast, last_train_date, CAPACITY
+        # fitting can fail if data is degenerate; return None so calling code can handle
+        print(f"Prophet fit error for region {region_name}: {e}")
+        return None, None, None
 
-    # Build future monthly frame and set cap for future rows as well
-    future = m.make_future_dataframe(periods=years_ahead * 12, freq='MS')
-    future['cap'] = CAPACITY
+    # 5) Create future frame and ensure cap column is present for all rows
+    future = m.make_future_dataframe(periods=years_ahead * 12, freq="MS")
+    future["cap"] = float(CAPACITY)
 
+    # 6) Predict and post-process to keep forecasts realistic
     forecast = m.predict(future)
-    last_train_date = monthly["ds"].max()
-    return m, forecast, last_train_date, CAPACITY
+
+    # Clip forecasts to [0, CAPACITY] to avoid negative or >cap values because of numerical reasons
+    for col in ["yhat", "yhat_lower", "yhat_upper"]:
+        if col in forecast.columns:
+            forecast[col] = forecast[col].clip(lower=0, upper=CAPACITY)
+
+    last_train_date = monthly["ds"].max() if not monthly["ds"].empty else None
+
+    return m, forecast, last_train_date
+
 
 st.markdown("## 🔮 Visitor Forecast (trained only on 2023–2025)")
 st.markdown("Forecasts are produced per-region using only months from 2023, 2024 and 2025 as training data.")
@@ -722,7 +717,7 @@ else:
     for i, reg in enumerate(regions_to_forecast):
         with cols[i]:
             st.markdown(f"### ➤ {reg} forecast")
-            model, fcst, last_train, cap = make_prophet_forecast(df, reg, metric_col, years_ahead=forecast_years, cap_multiplier=plateau_multiplier)
+            model, fcst, last_train = make_prophet_forecast(df, reg, metric_col, years_ahead=forecast_years)
             if model is None:
                 st.warning(f"No training rows for {reg} in years {TRAIN_YEARS}. Can't forecast.")
                 continue
@@ -730,22 +725,9 @@ else:
             # Interactive Prophet plot
             try:
                 fig_prophet = plot_plotly(model, fcst)
-                # Add horizontal cap line across forecast horizon for visual reference (if cap known)
-                if cap is not None:
-                    # use fcst ds for x-values (ensures same x-axis)
-                    x_vals = fcst['ds']
-                    cap_line = go.Scatter(
-                        x=x_vals,
-                        y=[cap] * len(x_vals),
-                        mode='lines',
-                        line=dict(color='red', width=2, dash='dash'),
-                        name='CAP (plateau)'
-                    )
-                    fig_prophet.add_trace(cap_line)
-
                 fig_prophet.update_layout(
                     title=f"{reg} — Monthly forecast (trained on {TRAIN_YEARS})",
-                    height=460,
+                    height=420,
                     template="plotly_white",
                     margin=dict(t=80)
                 )
@@ -788,16 +770,6 @@ else:
             except Exception as e:
                 st.write("Download button for regional forecast failed:", e)
 
-            # --- Display CAP and sample forecast rows for debugging/inspection ---
-            try:
-                if cap is not None:
-                    st.markdown(f"**Cap used for logistic growth:** {int(cap):,}  (multiplier = {plateau_multiplier})")
-                sample_fcst = fcst[['ds','yhat','yhat_lower','yhat_upper']].copy()
-                sample_fcst['ds'] = sample_fcst['ds'].dt.strftime('%Y-%m')
-                st.dataframe(sample_fcst.tail(12).rename(columns={'ds':'Month','yhat':'Predicted','yhat_lower':'Lower','yhat_upper':'Upper'}).style.format({ 'Predicted': '{:,.0f}', 'Lower':'{:,.0f}', 'Upper':'{:,.0f}'}), height=280)
-            except Exception as e:
-                st.write("Could not display sample forecast table:", e)
-
             for _, r in yearly_forecast.iterrows():
                 summary_rows.append({"region": reg, "year": int(r["year"]), "predicted": int(r["yhat"])})
 
@@ -820,3 +792,4 @@ else:
         except Exception as e:
             st.write("Download button for combined forecast failed:", e)
 # ------------------------------------------------------------------------------------------
+
